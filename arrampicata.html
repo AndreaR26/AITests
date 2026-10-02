@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viearrampicata</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root{--bg:#eceeed;--ink:#1d2528;--mute:#5d6b70;--line:#cfd5d6;--card:#fafbfa;--acc:#1d2528}
+@media (prefers-color-scheme:dark){:root{--bg:#171c1e;--ink:#e8ecec;--mute:#9aa8ac;--line:#2e3a3d;--card:#1f2629;--acc:#e8ecec}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font-family:"Avenir Next","Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink);display:flex}
+aside{width:320px;flex:none;padding:20px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;border-right:1px solid var(--line);background:var(--bg);z-index:2}
+h1{font-size:1.6rem;line-height:1.1;margin:0;font-weight:800;letter-spacing:-.02em}
+.sub{margin:4px 0 0;color:var(--mute);font-size:.9rem}
+form{display:flex;gap:6px}
+input[type=search]{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);font:inherit}
+button{padding:10px 14px;border:0;border-radius:6px;background:var(--acc);color:var(--bg);font:inherit;font-weight:600;cursor:pointer}
+:focus-visible{outline:3px solid #2a7fc4;outline-offset:2px}
+fieldset{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+legend{font-weight:700;margin-bottom:8px;padding:0}
+label{display:flex;align-items:center;gap:10px;cursor:pointer}
+label input{width:18px;height:18px;margin:0}
+.dot{width:12px;height:12px;border-radius:50%;flex:none}
+.n{margin-left:auto;color:var(--mute);font-variant-numeric:tabular-nums}
+#status{font-size:.9rem;color:var(--mute);min-height:2.6em}
+footer{margin-top:auto;font-size:.78rem;color:var(--mute);line-height:1.4}
+footer a{color:inherit}
+#map{flex:1;min-width:0}
+.pop h3{margin:0 0 2px;font-size:1rem}
+.pop .t{color:#5d6b70;font-size:.85rem;margin-bottom:6px}
+.pop dl{margin:0 0 8px;font-size:.85rem}
+.pop dt{font-weight:700;display:inline}.pop dd{display:inline;margin:0}
+.pop dd::after{content:"";display:block}
+.pop a{margin-right:10px}
+@media (max-width:760px){
+ body{flex-direction:column-reverse}
+ aside{width:100%;height:42%;border-right:0;border-top:1px solid var(--line);padding:14px}
+ #map{flex:none;height:58%}
+}
+</style>
+</head>
+<body>
+<aside>
+ <div>
+  <h1>viearrampicata</h1>
+  <p class="sub">Falesie, boulder e palestre dai dati di OpenStreetMap.</p>
+ </div>
+ <form id="f">
+  <input type="search" id="q" placeholder="Cerca un luogo, es. Arco" aria-label="Cerca un luogo">
+  <button>Cerca</button>
+ </form>
+ <fieldset id="flt"><legend>Cosa mostrare</legend></fieldset>
+ <div id="status" role="status" aria-live="polite"></div>
+ <footer>
+  Dati © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>, licenza ODbL. La copertura varia da zona a zona: gradi e vie spesso non sono mappati.
+ </footer>
+</aside>
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// Spot curati a mano. Aggiungi oggetti in questa lista, ad esempio:
+// {name:"Nome falesia", lat:45.9, lon:10.9, grade:"5a-7c", rock:"calcare", season:"tutto l'anno"}
+const CUSTOM = [];
+
+const TYPES = {
+  falesia:{c:"#e0782a", l:"Falesie", s:"Falesia"},
+  boulder:{c:"#6c4bc2", l:"Boulder", s:"Boulder"},
+  palestra:{c:"#2a7fc4", l:"Palestre indoor", s:"Palestra"},
+  custom:{c:"#1f9d62", l:"I miei spot", s:"Spot personale"}
+};
+const MIN_ZOOM = 9, LIMIT = 800;
+const ENDPOINTS = ["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const map = L.map("map", {zoomControl:true}).setView([42.2, 12.5], 6);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom:18, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+
+const layers = {}, counts = {}, seen = new Set();
+const flt = $("flt");
+for (const k in TYPES) {
+  layers[k] = L.layerGroup().addTo(map);
+  counts[k] = 0;
+  const lab = document.createElement("label");
+  lab.innerHTML = `<input type="checkbox" checked data-k="${k}"><span class="dot" style="background:${TYPES[k].c}"></span>${TYPES[k].l}<span class="n" id="n-${k}">0</span>`;
+  flt.appendChild(lab);
+}
+flt.addEventListener("change", e => {
+  const k = e.target.dataset.k;
+  e.target.checked ? map.addLayer(layers[k]) : map.removeLayer(layers[k]);
+});
+
+function classify(t) {
+  if (["route","route_bottom","route_top"].includes(t.climbing)) return null;
+  if (t.climbing === "boulder") return "boulder";
+  if (t.leisure === "sports_centre" || t.building || t.indoor === "yes") return "palestra";
+  return "falesia";
+}
+
+function popup(type, name, lat, lon, t, osmUrl) {
+  const rows = [];
+  const add = (k, v) => v && rows.push(`<dt>${k}: </dt><dd>${esc(v)}</dd>`);
+  add("Grado", t["climbing:grade:french"] || t.grade || t["climbing:grade:uiaa"]);
+  add("Vie", t["climbing:routes"] || t["climbing:sport"] === "yes" && "sportive");
+  add("Roccia", t.rock || t["climbing:rock"]);
+  add("Altezza", t.height && t.height + " m");
+  add("Stagione", t.season);
+  add("Descrizione", t.description || t.note);
+  const links = [`<a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}" target="_blank" rel="noopener">Indicazioni</a>`];
+  if (osmUrl) links.push(`<a href="${osmUrl}" target="_blank" rel="noopener">Scheda OSM</a>`);
+  const site = t.website || t["contact:website"];
+  if (site && /^https?:\/\//.test(site)) links.push(`<a href="${esc(site)}" target="_blank" rel="noopener">Sito</a>`);
+  return `<div class="pop"><h3>${esc(name)}</h3><div class="t">${TYPES[type].s}</div><dl>${rows.join("")}</dl>${links.join("")}</div>`;
+}
+
+function addPoint(type, name, lat, lon, t, osmUrl) {
+  const m = L.circleMarker([lat, lon], {radius:7, color:"#fff", weight:1.5, fillColor:TYPES[type].c, fillOpacity:.92});
+  m.bindPopup(popup(type, name, lat, lon, t, osmUrl));
+  layers[type].addLayer(m);
+  counts[type]++;
+  $("n-" + type).textContent = counts[type];
+}
+
+CUSTOM.forEach(s => addPoint("custom", s.name, s.lat, s.lon,
+  {"climbing:grade:french":s.grade, rock:s.rock, season:s.season, description:s.note, website:s.website}));
+
+let ctl = null, timer = null;
+async function overpass(q, signal) {
+  let last;
+  for (const url of ENDPOINTS) {
+    try {
+      const r = await fetch(url, {method:"POST", body:"data=" + encodeURIComponent(q), signal});
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return await r.json();
+    } catch (e) { if (e.name === "AbortError") throw e; last = e; }
+  }
+  throw last;
+}
+
+async function load() {
+  if (map.getZoom() < MIN_ZOOM) {
+    $("status").textContent = "Ingrandisci la mappa per caricare falesie e palestre della zona.";
+    return;
+  }
+  const b = map.getBounds();
+  const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map(x => x.toFixed(5)).join(",");
+  const q = `[out:json][timeout:25];nwr["sport"="climbing"](${bbox});out center ${LIMIT};`;
+  if (ctl) ctl.abort();
+  ctl = new AbortController();
+  $("status").textContent = "Carico i dati della zona...";
+  try {
+    const data = await overpass(q, ctl.signal);
+    let fresh = 0;
+    for (const e of data.elements) {
+      const id = e.type + e.id;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const t = e.tags || {};
+      const type = classify(t);
+      const lat = e.lat ?? (e.center && e.center.lat), lon = e.lon ?? (e.center && e.center.lon);
+      if (!type || lat == null) continue;
+      addPoint(type, t.name || "Senza nome", lat, lon, t, `https://www.openstreetmap.org/${e.type}/${e.id}`);
+      fresh++;
+    }
+    const full = data.elements.length >= LIMIT;
+    $("status").textContent = full
+      ? "Zona molto fitta: mostro i primi risultati. Ingrandisci per vedere il resto."
+      : fresh ? `Aggiunti ${fresh} luoghi in questa zona.` : "Nessun nuovo luogo in questa zona.";
+  } catch (e) {
+    if (e.name === "AbortError") return;
+    $("status").textContent = "Impossibile caricare i dati da OpenStreetMap. Riprova tra qualche secondo spostando la mappa.";
+  }
+}
+
+map.on("moveend", () => { clearTimeout(timer); timer = setTimeout(load, 600); });
+load();
+
+$("f").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const q = $("q").value.trim();
+  if (!q) return;
+  $("status").textContent = "Cerco " + q + "...";
+  try {
+    const r = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=it&q=" + encodeURIComponent(q));
+    const d = await r.json();
+    if (!d.length) { $("status").textContent = "Luogo non trovato. Prova con un altro nome."; return; }
+    map.flyTo([+d[0].lat, +d[0].lon], 11);
+  } catch (e) {
+    $("status").textContent = "La ricerca non è disponibile al momento. Sposta la mappa a mano.";
+  }
+});
+</script>
+</body>
+</html>
